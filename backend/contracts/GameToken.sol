@@ -8,7 +8,8 @@ contract GameToken is ERC20, Ownable {
     address public tokenStore;
     
     event TokenStoreSetter(address indexed newTokenStore);
-    
+    event Minted(address indexed to, uint256 amount);
+
     modifier onlyTokenStore() {
         require(msg.sender == tokenStore, "Only TokenStore can mint");
         _;
@@ -26,6 +27,7 @@ contract GameToken is ERC20, Ownable {
         require(to != address(0), "Cannot mint to zero address");
         require(amount > 0, "Amount must be greater than zero");
         _mint(to, amount);
+        emit Minted(to, amount);
     }
     
     function decimals() public pure override returns (uint8) {

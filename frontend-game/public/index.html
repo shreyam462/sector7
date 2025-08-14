@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blockchain Game</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.7.0/dist/ethers.umd.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        body { font-family: sans-serif; }
+        .container { max-width: 800px; margin: auto; padding: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Decentralized Game</h1>
+        <div id="wallet-info">
+            <p>Wallet: <span id="user-address">...</span></p>
+            <p>GT Balance: <span id="gt-balance">0</span></p>
+            <p>USDT Balance: <span id="usdt-balance">0</span></p>
+        </div>
+
+        <hr>
+
+        <div id="game-controls">
+            <h2>Game Controls</h2>
+            <button id="connectWalletBtn">Connect Wallet</button>
+            
+            <div id="buy-section" style="display: none;">
+                <h3>Buy GT</h3>
+                <input type="number" id="buyAmount" placeholder="USDT amount">
+                <button id="buyGtBtn">Buy GT</button>
+            </div>
+            
+            <div id="matchmaking-section" style="display: none;">
+                <h3>Find Match</h3>
+                <input type="number" id="stakeAmount" placeholder="GT stake amount">
+                <button id="findMatchBtn">Find Match</button>
+            </div>
+            
+            <div id="staking-section" style="display: none;">
+                <h3>Staking</h3>
+                <p>Match found! Match ID: <span id="matchIdDisplay"></span></p>
+                <p>You are playing against: <span id="opponentAddress"></span></p>
+                <button id="stakeBtn">Stake GT</button>
+            </div>
+        </div>
+
+        <hr>
+        
+        <div id="game-room" style="display: none;">
+            <h2>Game Room</h2>
+            <div id="game-board">
+                <div class="tic-tac-toe-grid">
+                    <div class="cell" onclick="makeMove(0)"></div>
+                    <div class="cell" onclick="makeMove(1)"></div>
+                    </div>
+            </div>
+        </div>
+        
+        <div id="logs">
+            <h3>Activity Log</h3>
+            <ul id="log-list"></ul>
+        </div>
+    </div>
+
+    <script>
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const socket = io('http://localhost:3001'); // Your game server
+        const API_GATEWAY_URL = 'http://localhost:38010/api';
+        
+        // Contract addresses and ABIs (same as round 1, but correct ones)
+        const usdtAddress = "0x..."; 
+        const gameTokenAddress = "0x..."; 
+        const playGameAddress = "0x...";
+        const usdtABI = [{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}];
+        const gameTokenABI = [{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}];
+        const playGameABI = [{"inputs":[{"internalType":"bytes32","name":"matchId","type":"bytes32"}],"name":"placeStake","outputs":[],"stateMutability":"nonpayable","type":"function"}];
+
+        const usdtContract = new ethers.Contract(usdtAddress, usdtABI, provider);
+        const gameTokenContract = new ethers.Contract(gameTokenAddress, gameTokenABI, provider);
+        const playGameContract = new ethers.Contract(playGameAddress, playGameABI, provider);
+
+        let userAddress;
+        let signer;
+        let currentMatchId;
+        let currentStakeAmount;
+
+        // --- Event Listeners and Functions ---
+        document.getElementById('connectWalletBtn').addEventListener('click', async () => {
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                userAddress = accounts[0];
+                document.getElementById('user-address').textContent = userAddress;
+                signer = await provider.getSigner();
+                updateBalances();
+                showSection('buy-section');
+                showSection('matchmaking-section');
+            } catch (error) {
+                console.error("Wallet connection failed:", error);
+            }
+        });
+
+        document.getElementById('buyGtBtn').addEventListener('click', async () => {
+            const amount = document.getElementById('buyAmount').value;
+            const usdtAmountWei = ethers.parseUnits(amount, 6);
+            log('Approving USDT...');
+            try {
+                const approvalTx = await usdtContract.connect(signer).approve(usdtAddress, usdtAmountWei);
+                await approvalTx.wait();
+                log('Approval successful. Calling backend to buy GT...');
+                
+                const response = await fetch(`${API_GATEWAY_URL}/store/buy`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ buyer: userAddress, usdtAmount: amount })
+                });
+                const data = await response.json();
+                log(`Purchase complete. TX: ${data.data.txHash}`);
+                updateBalances();
+            } catch (error) {
+                log(`Error buying GT: ${error.message}`);
+                console.error(error);
+            }
+        });
+
+        document.getElementById('findMatchBtn').addEventListener('click', () => {
+            const stakeAmount = document.getElementById('stakeAmount').value;
+            if (!stakeAmount) return log('Please enter a stake amount.');
+            
+            currentStakeAmount = stakeAmount;
+            log('Searching for a match...');
+            socket.emit('joinMatchmaking', { playerAddress: userAddress, stakeAmount });
+        });
+
+        document.getElementById('stakeBtn').addEventListener('click', async () => {
+            const stakeAmountWei = ethers.parseEther(currentStakeAmount);
+            log('Approving PlayGame contract to spend GT...');
+            try {
+                const approvalTx = await gameTokenContract.connect(signer).approve(playGameAddress, stakeAmountWei);
+                await approvalTx.wait();
+                log('Approval successful. Staking GT...');
+                
+                const stakeTx = await playGameContract.connect(signer).placeStake(currentMatchId);
+                await stakeTx.wait();
+                log(`Staked for match ${currentMatchId}. Waiting for opponent...`);
+                socket.emit('playerReady', { matchId: currentMatchId, playerAddress: userAddress });
+                showSection('matchmaking-section', false);
+                showSection('staking-section', false);
+            } catch (error) {
+                log(`Error staking: ${error.message}`);
+                console.error(error);
+            }
+        });
+
+        // --- Socket.IO Event Handlers ---
+        socket.on('matchFound', ({ matchId, opponent, stakeAmount }) => {
+            currentMatchId = matchId;
+            log(`Match found! Playing against ${opponent} for ${stakeAmount} GT.`);
+            document.getElementById('matchIdDisplay').textContent = matchId;
+            document.getElementById('opponentAddress').textContent = opponent;
+            showSection('staking-section', true);
+        });
+
+        socket.on('gameStart', ({ matchId }) => {
+            log('Both players have staked. Game starting!');
+            showSection('game-room', true);
+            // Initialize your game logic here
+        });
+
+        socket.on('gameEnd', ({ winner, txHash }) => {
+            log(`Game over! Winner: ${winner}. Payout TX: ${txHash}`);
+            // Display game end screen and transaction proof
+        });
+
+        // --- Helper Functions ---
+        async function updateBalances() {
+            if (!userAddress) return;
+            const [gtBalance, usdtBalance] = await Promise.all([
+                gameTokenContract.balanceOf(userAddress),
+                usdtContract.balanceOf(userAddress)
+            ]);
+            document.getElementById('gt-balance').textContent = ethers.formatEther(gtBalance);
+            document.getElementById('usdt-balance').textContent = ethers.formatUnits(usdtBalance, 6);
+        }
+
+        function log(message) {
+            const li = document.createElement('li');
+            li.textContent = message;
+            document.getElementById('log-list').prepend(li);
+        }
+        
+        function showSection(id, show = true) {
+            document.getElementById(id).style.display = show ? 'block' : 'none';
+        }
+
+        function makeMove(cellIndex) {
+            // Your game move logic
+            // Example:
+            // socket.emit('move', { matchId: currentMatchId, move: cellIndex });
+        }
+    </script>
+</body>
+</html>
